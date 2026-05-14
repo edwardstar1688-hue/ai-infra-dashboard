@@ -35,7 +35,7 @@ period = period_map[period_label]
 
 infra_tickers = st.sidebar.multiselect(
     "Infrastructure tickers",
-    ["SOXX", "SMH", "NVDA", "AVGO", "AMD", "ARM", "INTC", "TSM"],
+    ["SOXX", "QQQ", "SMH", "NVDA", "AVGO", "AMD", "ARM", "INTC", "TSM"],
     default=["SOXX", "QQQ"]
 )
 
