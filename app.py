@@ -11,11 +11,8 @@ st.set_page_config(
 )
 
 st.title("AI Infrastructure vs Platform Relative Strength Dashboard")
-st.caption("SOXX / Platform Basket and QQQ / Platform Basket")
+st.caption("SOXX / Platform Basket and QQQ / Platform Basket with Moving Averages and Deviation Rates")
 
-# -----------------------------
-# Sidebar controls
-# -----------------------------
 st.sidebar.header("Settings")
 
 period_label = st.sidebar.selectbox(
@@ -51,11 +48,14 @@ basket_method = st.sidebar.radio(
     index=0
 )
 
+chart_mode = st.sidebar.radio(
+    "Chart mode",
+    ["Relative strength + moving averages", "Deviation from moving averages"],
+    index=0
+)
+
 show_raw_data = st.sidebar.checkbox("Show raw data table", value=False)
 
-# -----------------------------
-# Data loading
-# -----------------------------
 @st.cache_data(ttl=3600)
 def load_prices(tickers, period):
     data = yf.download(
@@ -79,7 +79,6 @@ def load_prices(tickers, period):
 
     prices = prices.dropna(how="all")
     return prices
-
 
 all_tickers = sorted(list(set(infra_tickers + platform_tickers)))
 
@@ -106,17 +105,12 @@ if len(available_infra) == 0 or len(available_platform) == 0:
 
 prices = prices[available_infra + available_platform].dropna()
 
-# -----------------------------
-# Platform basket calculation
-# -----------------------------
 platform_prices = prices[available_platform].copy()
 
 if basket_method == "Equal-weight index":
-    # Each platform stock starts at 100, then the average becomes the platform basket.
     platform_indexed = platform_prices / platform_prices.iloc[0] * 100
     platform_basket = platform_indexed.mean(axis=1)
 else:
-    # Simple average of stock prices. Easier, but less clean because high-priced stocks dominate.
     platform_basket = platform_prices.mean(axis=1)
 
 result = pd.DataFrame(index=prices.index)
@@ -129,116 +123,174 @@ for ticker in available_infra:
     else:
         ratio = prices[ticker] / result["PLATFORM_BASKET"]
 
+    rs_idx = ratio / ratio.iloc[0] * 100
+    ma21 = rs_idx.rolling(window=21).mean()
+    ma60 = rs_idx.rolling(window=60).mean()
+    dev21 = (rs_idx / ma21 - 1) * 100
+    dev60 = (rs_idx / ma60 - 1) * 100
+
     result[f"{ticker}_PLATFORM_RATIO"] = ratio
-    result[f"{ticker}_PLATFORM_IDX"] = ratio / ratio.iloc[0] * 100
-
-# -----------------------------
-# Helper functions
-# -----------------------------
-def pct_change_from_days(series, days):
-    if len(series) <= days:
-        return None
-    return (series.iloc[-1] / series.iloc[-days - 1] - 1) * 100
-
-def trend_text(value):
-    if value is None:
-        return "Not enough data"
-    if value > 3:
-        return "Strong relative strength"
-    if value > 0:
-        return "Mild relative strength"
-    if value > -3:
-        return "Mild relative weakness"
-    return "Strong relative weakness"
+    result[f"{ticker}_PLATFORM_IDX"] = rs_idx
+    result[f"{ticker}_MA21"] = ma21
+    result[f"{ticker}_MA60"] = ma60
+    result[f"{ticker}_DEV21_PCT"] = dev21
+    result[f"{ticker}_DEV60_PCT"] = dev60
 
 def format_pct(value):
-    if value is None:
+    if value is None or pd.isna(value):
         return "N/A"
     return f"{value:+.2f}%"
 
-# -----------------------------
-# Summary cards
-# -----------------------------
+def format_num(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{value:.2f}"
+
+def dev_signal(value):
+    if value is None or pd.isna(value):
+        return "Not enough data"
+    if value >= 10:
+        return "Above +10% reference"
+    if value > 0:
+        return "Above moving average"
+    if value > -10:
+        return "Below moving average"
+    return "Below -10% reference"
+
 st.subheader("Current Relative Strength Summary")
 
 cols = st.columns(len(available_infra))
 
 for col, ticker in zip(cols, available_infra):
     idx_col = f"{ticker}_PLATFORM_IDX"
-    current_value = result[idx_col].iloc[-1]
-    one_month = pct_change_from_days(result[idx_col], 21)
+    dev21_col = f"{ticker}_DEV21_PCT"
+    current_value = result[idx_col].dropna().iloc[-1]
+    current_dev21 = result[dev21_col].dropna().iloc[-1] if not result[dev21_col].dropna().empty else None
 
     with col:
         st.metric(
             label=f"{ticker} vs Platform",
             value=f"{current_value:.2f}",
-            delta=format_pct(one_month)
+            delta=format_pct(current_dev21)
         )
-        st.caption(f"1-month signal: {trend_text(one_month)}")
+        st.caption(f"21-day MA deviation: {dev_signal(current_dev21)}")
 
-# -----------------------------
-# Main chart
-# -----------------------------
-st.subheader("Relative Strength Chart")
-st.caption("Index starts at 100 on the first available trading day.")
+if chart_mode == "Relative strength + moving averages":
+    st.subheader("Relative Strength Index with 21-Day and 60-Day Moving Averages")
+    st.caption("Relative strength index starts at 100 on the first available trading day.")
 
-fig, ax = plt.subplots(figsize=(13, 6))
+    for ticker in available_infra:
+        fig, ax = plt.subplots(figsize=(13, 6))
 
-for ticker in available_infra:
-    ax.plot(
-        result.index,
-        result[f"{ticker}_PLATFORM_IDX"],
-        label=f"{ticker} / Platform Basket"
-    )
+        ax.plot(
+            result.index,
+            result[f"{ticker}_PLATFORM_IDX"],
+            label=f"{ticker} / Platform Relative Strength Index",
+            linewidth=1.8
+        )
+        ax.plot(
+            result.index,
+            result[f"{ticker}_MA21"],
+            label="21-Day Moving Average",
+            linestyle="--",
+            linewidth=1.4
+        )
+        ax.plot(
+            result.index,
+            result[f"{ticker}_MA60"],
+            label="60-Day Moving Average",
+            linestyle=":",
+            linewidth=1.6
+        )
 
-ax.axhline(100, linestyle="--", linewidth=1)
-ax.set_title("AI Infrastructure vs Platform Relative Strength")
-ax.set_xlabel("Date")
-ax.set_ylabel("Index, first day = 100")
-ax.legend()
-ax.grid(True, alpha=0.3)
+        ax.axhline(100, linestyle="-", linewidth=0.8)
+        ax.set_title(f"{ticker} / Platform Relative Strength with Moving Averages")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Index, first day = 100")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
-st.pyplot(fig)
+        st.pyplot(fig)
 
-# -----------------------------
-# Detailed table
-# -----------------------------
+if chart_mode == "Deviation from moving averages":
+    st.subheader("Deviation Rate from Moving Averages")
+    st.caption("Deviation formula: (Relative Strength Index / Moving Average - 1) × 100")
+
+    for ticker in available_infra:
+        fig, ax = plt.subplots(figsize=(13, 6))
+
+        ax.plot(
+            result.index,
+            result[f"{ticker}_DEV21_PCT"],
+            label="Deviation from 21-Day Moving Average (%)",
+            linewidth=1.7
+        )
+        ax.plot(
+            result.index,
+            result[f"{ticker}_DEV60_PCT"],
+            label="Deviation from 60-Day Moving Average (%)",
+            linewidth=1.7
+        )
+
+        ax.axhline(10, linestyle="--", linewidth=1.2, label="+10% Reference Line")
+        ax.axhline(-10, linestyle="--", linewidth=1.2, label="-10% Reference Line")
+        ax.axhline(0, linestyle="-", linewidth=0.8)
+
+        ax.set_title(f"{ticker} / Platform Deviation from Moving Averages")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Deviation Rate (%)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        st.pyplot(fig)
+
 st.subheader("Latest Readings")
 
 summary_rows = []
 
 for ticker in available_infra:
     idx_col = f"{ticker}_PLATFORM_IDX"
-    series = result[idx_col]
+    ma21_col = f"{ticker}_MA21"
+    ma60_col = f"{ticker}_MA60"
+    dev21_col = f"{ticker}_DEV21_PCT"
+    dev60_col = f"{ticker}_DEV60_PCT"
+
+    latest_dev21 = result[dev21_col].dropna().iloc[-1] if not result[dev21_col].dropna().empty else None
+    latest_dev60 = result[dev60_col].dropna().iloc[-1] if not result[dev60_col].dropna().empty else None
 
     summary_rows.append({
         "Ticker": ticker,
-        "Current Index": round(series.iloc[-1], 2),
-        "1W Change": format_pct(pct_change_from_days(series, 5)),
-        "1M Change": format_pct(pct_change_from_days(series, 21)),
-        "3M Change": format_pct(pct_change_from_days(series, 63)),
-        "Interpretation": trend_text(pct_change_from_days(series, 21))
+        "Relative Strength Index": format_num(result[idx_col].dropna().iloc[-1]),
+        "21-Day MA": format_num(result[ma21_col].dropna().iloc[-1]) if not result[ma21_col].dropna().empty else "N/A",
+        "60-Day MA": format_num(result[ma60_col].dropna().iloc[-1]) if not result[ma60_col].dropna().empty else "N/A",
+        "Deviation vs 21-Day MA": format_pct(latest_dev21),
+        "Deviation vs 60-Day MA": format_pct(latest_dev60),
+        "Signal vs 21-Day MA": dev_signal(latest_dev21),
+        "Signal vs 60-Day MA": dev_signal(latest_dev60),
     })
 
 summary_df = pd.DataFrame(summary_rows)
 st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-# -----------------------------
-# Explanation
-# -----------------------------
 st.subheader("How to Read This Dashboard")
 
 st.markdown("""
-- If the line rises above 100, the selected infrastructure ticker is outperforming the platform basket.
-- If the line falls below 100, the selected infrastructure ticker is underperforming the platform basket.
-- The platform basket is currently built from the selected platform companies in the sidebar.
-- The default platform basket is GOOGL, MSFT, AMZN, and META.
-- Data is refreshed automatically, with a one-hour cache to avoid unnecessary repeated downloads.
+### Relative Strength Index
+- The relative strength index compares each selected infrastructure ticker against the selected platform basket.
+- If the line rises, the infrastructure ticker is outperforming the platform basket.
+- If the line falls, the infrastructure ticker is underperforming the platform basket.
+
+### Moving Averages
+- The 21-day moving average shows the shorter-term trend.
+- The 60-day moving average shows the medium-term trend.
+
+### Deviation Rate
+- Formula: `(Relative Strength Index / Moving Average - 1) × 100`
+- A positive deviation means the relative strength index is above its moving average.
+- A negative deviation means the relative strength index is below its moving average.
+- The +10% and -10% lines are reference levels for unusually large deviations.
 """)
 
-# -----------------------------
-# Download
-# -----------------------------
 csv = result.to_csv(encoding="utf-8-sig")
 st.download_button(
     label="Download calculated data as CSV",
